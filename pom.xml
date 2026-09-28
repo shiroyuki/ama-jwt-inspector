@@ -1,0 +1,84 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+     <groupId>com.shiroyuki</groupId>
+     <artifactId>jwt-inspector</artifactId>
+     <version>0.1</version>
+
+     <name>JWT Inspector</name>
+     <description>A desktop application to decode and inspect JWT tokens.</description>
+     <license>
+         <name>Apache 2.0</name>
+         <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+         <distribution>repo</distribution>
+     </license>
+     <organization>
+         <name>Juti Noppornpitak</name>
+     </organization>
+
+     <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>25</maven.compiler.source>
+        <maven.compiler.target>25</maven.compiler.target>
+          <javafx.version>21</javafx.version>
+          <jjwt.version>0.12.3</jjwt.version>
+          <jackson.version>2.18.3</jackson.version>
+      </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.openjfx</groupId>
+            <artifactId>javafx-controls</artifactId>
+            <version>${javafx.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.openjfx</groupId>
+            <artifactId>javafx-fxml</artifactId>
+            <version>${javafx.version}</version>
+        </dependency>
+          <dependency>
+              <groupId>io.jsonwebtoken</groupId>
+              <artifactId>jjwt-api</artifactId>
+              <version>${jjwt.version}</version>
+          </dependency>
+          <dependency>
+              <groupId>io.jsonwebtoken</groupId>
+              <artifactId>jjwt-impl</artifactId>
+              <version>${jjwt.version}</version>
+              <scope>runtime</scope>
+          </dependency>
+           <dependency>
+               <groupId>io.jsonwebtoken</groupId>
+               <artifactId>jjwt-jackson</artifactId>
+                <version>${jjwt.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+           <dependency>
+               <groupId>com.fasterxml.jackson.core</groupId>
+               <artifactId>jackson-databind</artifactId>
+               <version>${jackson.version}</version>
+           </dependency>
+       </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.openjfx</groupId>
+                <artifactId>javafx-maven-plugin</artifactId>
+                <version>0.0.8</version>
+                <executions>
+                    <execution>
+                        <id>default- javafx</id>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <mainClass>com.jwt.inspector.App</mainClass>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

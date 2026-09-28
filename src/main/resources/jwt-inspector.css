@@ -1,0 +1,80 @@
+/* ── Output table styling (Header / Payload / Signature) ──────────────────── */
+
+.table-view {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6;
+    -fx-table-cell-border-color: transparent;
+    -fx-border-color: transparent;
+    -fx-font-family: "Menlo", "Consolas", monospace;
+    -fx-font-size: 12px;
+    -fx-table-header-border-color: transparent;
+}
+
+/* Column headers */
+.table-view .column-header,
+.table-view .column-header .label {
+    -fx-background-color: #2a2a3e;
+    -fx-text-fill: #cdd6f4;
+    -fx-font-weight: bold;
+    -fx-font-size: 11px;
+    -fx-alignment: CENTER-LEFT;
+    -fx-padding: 6 10 6 10;
+}
+
+.table-view .column-header .separator {
+    -fx-background-color: #45475a;
+    -fx-padding: 0;
+}
+
+/* Table body / rows */
+.table-view .table-row-cell {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+    -fx-border-width: 0 0 1 0;
+    -fx-border-color: #2a2a3e;
+    -fx-text-fill: #cdd6f4;
+    -fx-cell-size: 26;
+}
+
+.table-view .table-cell {
+    -fx-text-fill: #cdd6f4;
+    -fx-alignment: CENTER-LEFT;
+    -fx-padding: 3 10 3 10;
+    -fx-border-width: 0;
+}
+
+/* Key column stays muted; value column stays primary */
+.table-view .table-cell {
+    -fx-alignment: CENTER-LEFT;
+}
+
+.table-view:focused .table-row-cell:filled:selected {
+    -fx-background-color: #313149;
+}
+
+.table-view .table-row-cell:filled:selected .table-cell {
+    -fx-text-fill: #cdd6f4;
+}
+
+.table-view .table-row-cell:odd {
+    -fx-background-color: #26263a;
+}
+
+.table-view .table-row-cell:even {
+    -fx-background-color: #1e1e2e;
+}
+
+/* Scrollbars kept subtle */
+.table-view .scroll-bar {
+    -fx-background-color: transparent;
+}
+
+.table-view .scroll-bar .thumb {
+    -fx-background-color: #45475a;
+    -fx-background-radius: 4;
+}
+
+.table-view .scroll-bar .increment-button,
+.table-view .scroll-bar .decrement-button {
+    -fx-background-color: transparent;
+}

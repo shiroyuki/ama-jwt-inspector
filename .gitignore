@@ -1,0 +1,44 @@
+# Build output
+target/
+build/
+out/
+*.jar
+
+# Maven
+.mvn/wrapper/maven-wrapper.jar
+
+# Gradle
+.gradle/
+
+# IDE - IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# IDE - Eclipse
+.classpath
+.project
+.settings/
+.tern-project
+
+# IDE - VS Code
+.vscode/
+
+# IDE - NetBeans
+nbproject/
+nb-*.xml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Env / secrets
+.env
+.env.*
+*.env

@@ -1,0 +1,70 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'org.openjfx.javafxplugin' version '0.1.0'
+}
+
+group = 'com.shiroyuki'
+version = '0.1'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+javafx {
+    version = '24.0.1'
+    modules = ['javafx.controls', 'javafx.graphics']
+}
+
+dependencies {
+    // JJWT 0.12.x — api for compile, impl + jackson at runtime
+    implementation  'io.jsonwebtoken:jjwt-api:0.12.7'
+    runtimeOnly     'io.jsonwebtoken:jjwt-impl:0.12.7'
+    runtimeOnly     'io.jsonwebtoken:jjwt-jackson:0.12.7'
+
+    // Jackson for pretty-printing JSON in the UI
+    implementation  'com.fasterxml.jackson.core:jackson-databind:2.18.3'
+}
+
+application {
+    mainClass = 'com.jwt.inspector.App'
+}
+
+def about = [
+        version   : project.version,
+        license   : 'Apache-2.0',
+        licenseUrl: 'https://www.apache.org/licenses/LICENSE-2.0',
+        copyright : 'Juti Noppornpitak'
+]
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    // Allow preview features on Java 25 (optional, but handy)
+    options.compilerArgs += ['--enable-preview']
+}
+
+tasks.withType(JavaExec).configureEach {
+    jvmArgs '--enable-preview'
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': 'com.jwt.inspector.App',
+                   'Implementation-Title'   : 'JWT Inspector',
+                   'Implementation-Version' : about.version,
+                   'Implementation-Vendor'  : about.copyright,
+                   'Implementation-License' : about.license,
+                   'Implementation-License-Url': about.licenseUrl
+     }
+     // Fat jar — bundle everything
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+     }
+}
