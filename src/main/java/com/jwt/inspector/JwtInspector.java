@@ -10,8 +10,23 @@ import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.MalformedJwtException;
 import io.jsonwebtoken.UnsupportedJwtException;
+import io.jsonwebtoken.security.Keys;
 import io.jsonwebtoken.security.SignatureException;
 
+import java.math.BigInteger;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.security.AlgorithmParameters;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.interfaces.ECPublicKey;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.ECParameterSpec;
+import java.security.spec.ECGenParameterSpec;
+import java.security.spec.ECPublicKeySpec;
+import java.security.spec.RSAPublicKeySpec;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -20,6 +35,7 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -92,53 +108,77 @@ public class JwtInspector {
       }
 
     /**
-     * Decodes and verifies a JWT using a HMAC secret key.
+     * Decodes a JWT and verifies its signature.
+     *
+     * Verification is algorithm-aware:
+     *   - HMAC (HS256/384/512) tokens are verified with the provided {@code secret}.
+      *   - asymmetric (RSA/ECDS/EdDSA, e.g. RS256/ES256/PS256) tokens are verified
+      *     against the issuer's public key, fetched from the {@code iss} claim's JWKS
+      *     endpoint. Most OIDC providers rotate keys, so the token's {@code kid} is used
+      *     to select the matching key.
      */
     public static InspectionResult decodeAndVerify(String token, String secret) {
+        InspectionResult base;
         try {
-            // Use JJWT's unsigned parser to peek at structure first (for display)
-            InspectionResult base = decode(token);
+            base = decode(token);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Malformed JWT: " + e.getMessage());
+        }
 
-            // Now verify via JJWT
-            byte[] keyBytes = secret.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            var key = io.jsonwebtoken.security.Keys.hmacShaKeyFor(keyBytes);
+        Map<String, Object> header = parseJsonToMap(base.headerJson());
+        Map<String, Object> claims = parseJsonToMap(base.payloadJson());
+        String alg = asString(header.get("alg"));
+        String kid = asString(header.get("kid"));
+        String iss = asString(claims.get("iss"));
 
-            Jwts.parser()
-                .verifyWith(key)
-                .build()
-                .parseSignedClaims(token.trim());
+        io.jsonwebtoken.JwtParser parser;
+        String keyNote;
+        try {
+            if (isHmacAlgorithm(alg)) {
+                byte[] keyBytes = secret.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                var key = Keys.hmacShaKeyFor(keyBytes);
+                parser = Jwts.parser().verifyWith(key).build();
+                keyNote = "HMAC secret";
+             } else {
+                PublicKey publicKey = resolveAsymmetricKey(iss, kid, alg);
+                if (publicKey == null) {
+                    throw new IllegalArgumentException(
+                         "Cannot verify " + alg + " signature: no issuer JWKS reachable"
+                         + (iss == null ? "" : " at " + jwksUrl(iss))
+                         + ". Paste the public key, or inspect without verification.");
+                 }
+                parser = Jwts.parser().verifyWith(publicKey).build();
+                keyNote = "issuer JWKS" + (kid != null ? " (kid=" + kid + ")" : "");
+             }
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Failed to resolve verification key: " + e.getMessage());
+        }
 
+        try {
+            parser.parseSignedClaims(token.trim());
             return new InspectionResult(
                     base.headerJson(), base.payloadJson(), base.signature(),
-                    base.isExpired(), true, "✓ Signature is VALID",
+                    base.isExpired(), true, "✓ Signature is VALID (via " + keyNote + ")",
                     base.expiresAt(), base.issuedAt(), base.notBefore(),
                     base.analysis()
             );
         } catch (ExpiredJwtException e) {
             // Signature was valid but token is expired — still show decoded content
-            try {
-                InspectionResult base = decode(token);
-                 return new InspectionResult(
-                         base.headerJson(), base.payloadJson(), base.signature(),
-                         true, true, "✓ Signature is VALID (token is expired)",
-                         base.expiresAt(), base.issuedAt(), base.notBefore(),
-                         base.analysis()
-                  );
-            } catch (Exception ex) {
-                throw new IllegalArgumentException("Failed to parse expired token: " + ex.getMessage());
-            }
+            return new InspectionResult(
+                    base.headerJson(), base.payloadJson(), base.signature(),
+                    true, true, "✓ Signature is VALID via " + keyNote + " (token is expired)",
+                    base.expiresAt(), base.issuedAt(), base.notBefore(),
+                    base.analysis()
+            );
         } catch (SignatureException e) {
-            try {
-                InspectionResult base = decode(token);
-                 return new InspectionResult(
-                         base.headerJson(), base.payloadJson(), base.signature(),
-                         base.isExpired(), false, "✗ Signature is INVALID — " + e.getMessage(),
-                         base.expiresAt(), base.issuedAt(), base.notBefore(),
-                         base.analysis()
-                   );
-            } catch (Exception ex) {
-                throw new IllegalArgumentException("Failed to parse token: " + ex.getMessage());
-            }
+            return new InspectionResult(
+                    base.headerJson(), base.payloadJson(), base.signature(),
+                    base.isExpired(), false, "✗ Signature is INVALID (via " + keyNote + ")",
+                    base.expiresAt(), base.issuedAt(), base.notBefore(),
+                    base.analysis()
+            );
         } catch (MalformedJwtException | UnsupportedJwtException e) {
             throw new IllegalArgumentException("Malformed JWT: " + e.getMessage());
         } catch (JwtException e) {
@@ -146,6 +186,104 @@ public class JwtInspector {
         } catch (Exception e) {
             throw new IllegalArgumentException("Verification failed: " + e.getMessage());
         }
+    }
+
+    /** True when the algorithm signs with a shared (symmetric) secret. */
+    private static boolean isHmacAlgorithm(String alg) {
+        return alg != null && alg.toUpperCase(Locale.ROOT).startsWith("HS");
+    }
+
+    /** Derives a provider's JWKS endpoint from its issuer URL. */
+    private static String jwksUrl(String iss) {
+        if (iss == null || iss.isBlank()) return null;
+        String base = iss.trim();
+        // Cognito / Cognito-IdP expose keys at <iss>/.well-known/jwks.json
+        if (base.contains("cognito")) {
+            return base.replaceFirst("/+$", "") + "/.well-known/jwks.json";
+        }
+        // Generic OIDC discovery, with the standard issuer-suffix trimmed off.
+        return base + "/.well-known/jwks.json";
+    }
+
+    /** Fetches and parses the issuer's JWKS, returning the key matching {@code kid}. */
+    private static PublicKey resolveAsymmetricKey(String iss, String kid, String alg) {
+        String url = jwksUrl(iss);
+        if (url == null) return null;
+
+        String jwksJson;
+        try {
+            HttpClient client = HttpClient.newBuilder()
+                    .followRedirects(HttpClient.Redirect.NORMAL)
+                    .connectTimeout(java.time.Duration.ofSeconds(10))
+                    .build();
+            HttpResponse<String> resp = client.send(
+                    HttpRequest.newBuilder(URI.create(url))
+                              .timeout(java.time.Duration.ofSeconds(10))
+                              .GET()
+                              .build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() / 100 != 2) return null;
+            jwksJson = resp.body();
+        } catch (Exception e) {
+            return null;
+        }
+
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> root = parseJsonToMap(jwksJson);
+            Object keysObj = root.get("keys");
+            if (!(keysObj instanceof List<?> keys)) return null;
+
+            for (Object keyObj : keys) {
+                if (!(keyObj instanceof Map<?, ?> raw)) continue;
+                Map<String, Object> k = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> e : raw.entrySet()) {
+                    k.put(String.valueOf(e.getKey()), e.getValue());
+                }
+                if (kid != null && !kid.equals(k.get("kid"))) continue;
+                if (k.get("use") != null && !"sig".equals(k.get("use"))) continue;
+                try {
+                    PublicKey pk = buildPublicKey((String) alg, k);
+                    if (pk != null) return pk;
+                } catch (Exception ignored) {
+                    // try the next candidate key
+                }
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+        return null;
+    }
+
+    /** Builds a JCA PublicKey from a JWK entry, keyed on the token's algorithm. */
+    private static PublicKey buildPublicKey(String alg, Map<String, Object> jwk) throws Exception {
+        String kty = String.valueOf(jwk.getOrDefault("kty", "RSA"));
+        String algUpper = alg == null ? "" : alg.toUpperCase(Locale.ROOT);
+
+        if (kty.equalsIgnoreCase("RSA") || algUpper.startsWith("RS") || algUpper.startsWith("PS")) {
+            RSAPublicKeySpec spec = new RSAPublicKeySpec(
+                    new BigInteger(1, fromBase64Url((String) jwk.get("n"))),
+                    new BigInteger(1, fromBase64Url((String) jwk.get("e"))));
+            return KeyFactory.getInstance("RSA").generatePublic(spec);
+         }
+
+        if (kty.equalsIgnoreCase("EC") || algUpper.startsWith("ES") || algUpper.startsWith("ED")) {
+            String crv = String.valueOf(jwk.get("crv"));
+            AlgorithmParameters params = AlgorithmParameters.getInstance("EC");
+            params.init(new ECGenParameterSpec(crv));
+            ECParameterSpec ecSpec = params.getParameterSpec(ECParameterSpec.class);
+            ECPublicKeySpec spec = new ECPublicKeySpec(
+                    new java.security.spec.ECPoint(
+                            new BigInteger(1, fromBase64Url((String) jwk.get("x"))),
+                            new BigInteger(1, fromBase64Url((String) jwk.get("y")))),
+                    ecSpec);
+            return KeyFactory.getInstance("EC").generatePublic(spec);
+         }
+        return null;
+    }
+
+    private static byte[] fromBase64Url(String s) {
+        return Base64.getUrlDecoder().decode(padBase64(s));
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

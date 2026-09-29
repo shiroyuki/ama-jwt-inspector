@@ -19,7 +19,7 @@ java {
 
 javafx {
     version = '24.0.1'
-    modules = ['javafx.controls', 'javafx.graphics']
+    modules = ['javafx.base', 'javafx.controls', 'javafx.graphics']
 }
 
 dependencies {
@@ -64,7 +64,130 @@ jar {
      }
      // Fat jar — bundle everything
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    from {
-        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
-     }
+     from {
+         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+       }
 }
+
+// ── Native packaging: a lightweight jlinked JRE + JavaFX, bundled per platform ─
+// jpackage cannot cross-compile, so each installer task is gated to its host OS;
+// run the matching task on that OS to produce the release artifact.
+
+ext {
+       // Modules the runtime needs; JavaFX transitively brings its native peers.
+    jlinkModules = ['java.desktop', 'java.xml', 'javafx.controls']
+       // Installer types jpackage can emit per host OS.
+    pkgTypes = [
+             macos:    ['app-image', 'dmg'],
+             linux:    ['app-image', 'deb', 'rpm'],
+             windows: ['app-image', 'msi']
+       ]
+}
+
+// jpackage rejects a leading-zero version, so normalise 0.1 -> 1.1.0.
+def toJpackageVersion = { String v ->
+    def nums = (v =~ /\d+/).collect { it[0] as int }
+    if (nums.size() == 0) nums << 1
+    if (nums[0] == 0) nums[0] = 1
+    while (nums.size() < 3) nums << 0
+    nums[0..2].join('.')
+}
+ext.jpackageVersion = toJpackageVersion(project.version.toString())
+
+def javaHome     = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+           .get().metadata.installationPath.asFile
+def jlinkBin    = "${javaHome}/bin/jlink"
+def jpackageBin = "${javaHome}/bin/jpackage"
+
+// The openjfx plugin resolves the platform-specific JavaFX jars into runtimeClasspath;
+// those form the jlink module-path and are kept out of the app jars (they go in the RRI).
+def javafxJars = configurations.runtimeClasspath.findAll {
+     it.name.toLowerCase().startsWith('javafx')
+}
+def appJars = configurations.runtimeClasspath.findAll {
+     !it.name.toLowerCase().startsWith('javafx')
+}
+
+// Shared output locations so tasks reference concrete directories.
+def jlinkDir = layout.buildDirectory.dir('jlink')
+def inputDir = layout.buildDirectory.dir('jpackage/input')
+
+// Minimal jlinked runtime image that includes the JavaFX modules + native peers.
+// jlink auto-adds the toolchain's own jmods; only the JavaFX jars need supplying.
+def jlink = tasks.register('jlink', Exec) {
+    description = 'Create a minimal jlinked JRE that bundles JavaFX.'
+    dependsOn 'classes'
+    inputs.files(javaHome, javafxJars)
+    def modulePath = javafxJars.collect { it.toString() }.join(java.io.File.pathSeparator)
+    outputs.dir(jlinkDir)
+    def cmd = [
+             jlinkBin,
+                '--module-path', modulePath,
+                  '--add-modules', jlinkModules.join(','),
+                     '--output',   jlinkDir.get().asFile,
+                    '--no-header-files', '--no-man-pages', '--strip-debug']
+        // jlink refuses to write into a non-empty directory, so remove it first.
+    doFirst { jlinkDir.get().asFile.deleteDir() }
+    commandLine cmd
+}
+
+// The jpackage input dir: the app jar + its library jars (JavaFX excluded).
+def appJar = tasks.register('appJar', Jar) {
+    description = 'Build the app jar consumed by jpackage.'
+    dependsOn 'classes'
+    from 'build/classes/java/main'
+    from 'build/resources/main'
+    archiveBaseName.set('jwt-inspector')
+    archiveVersion.set(project.version)
+    manifest { attributes 'Main-Class': 'com.jwt.inspector.App' }
+}
+
+def pkgInput = tasks.register('preparePkgInput', Copy) {
+    dependsOn appJar
+    from appJar
+    from appJars
+    into inputDir
+}
+
+def hostPkgTypes = { ->
+    def os = org.gradle.internal.jvm.Jvm.current().os
+    if (os.isMacOsX())  return pkgTypes.macos
+    if (os.isWindows()) return pkgTypes.windows
+    return pkgTypes.linux
+}()
+
+// One jpackage task per installer type the host OS supports.
+hostPkgTypes.each { type ->
+      def taskName = type == 'app-image' ? 'jpackage' : 'jpackage' + type.capitalize()
+      tasks.register(taskName, Exec) {
+          description = "Build a ${type} package."
+          dependsOn appJar, jlink, pkgInput
+          def outDir = layout.buildDirectory.dir("jpackage/${type}")
+          inputs.dir inputDir
+          inputs.dir jlinkDir
+          outputs.dir outDir
+
+             // The .icns applies only to the macOS host; other platforms use their own icon formats.
+          def cmd = [jpackageBin,
+                       '--name',               'JWT Inspector',
+                        '--type',            type,
+                        '--input',           inputDir.get().asFile,
+                        '--main-jar',        appJar.get().archiveFileName.get(),
+                        '--main-class',      'com.jwt.inspector.App',
+                        '--runtime-image',   jlinkDir.get().asFile,
+                        '--dest',            outDir.get().asFile,
+                        '--app-version',     jpackageVersion,
+                        '--vendor',          'Juti Noppornpitak',
+                        // Silence the JDK 25+ "restricted method" warning JavaFX emits
+                        // when it loads its native peers, so the app runs clean.
+                        '--java-options',    '--enable-native-access=javafx.base,javafx.controls,javafx.graphics',
+                        '--java-options',    '-Djpackage.app-version=' + jpackageVersion]
+           if (org.gradle.internal.jvm.Jvm.current().os.isMacOsX()) {
+             cmd.addAll(['--icon', 'src/main/resources/app-icon.icns'])
+             }
+           commandLine cmd
+         }
+     }
+
+
+

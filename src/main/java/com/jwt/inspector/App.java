@@ -2,6 +2,7 @@ package com.jwt.inspector;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import javafx.application.Application;
+import javafx.application.ColorScheme;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -9,14 +10,21 @@ import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.Dialog;
+import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListCell;
+import javafx.scene.control.Separator;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableView;
-import javafx.scene.control.cell.PropertyValueFactory;
+import javafx.scene.control.Tooltip;
+import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.BorderPane;
@@ -30,6 +38,7 @@ import javafx.scene.text.Text;
 import javafx.scene.text.TextFlow;
 import javafx.stage.Modality;
 import javafx.stage.Stage;
+import javafx.util.StringConverter;
 
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -37,26 +46,60 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.prefs.Preferences;
 import java.util.regex.Pattern;
 
 public class App extends Application {
 
-    // ── colour constants (dark theme) ────────────────────────────────────────
-    private static final String BG_DARK       = "#1e1e2e";
-    private static final String BG_SURFACE    = "#2a2a3e";
-    private static final String BG_CARD       = "#313149";
-    private static final String ACCENT        = "#7c6af7";
-    private static final String ACCENT_HOVER  = "#9d8fff";
-    private static final String SUCCESS       = "#4ec9b0";
-    private static final String ERROR         = "#f28779";
-    private static final String TEXT_PRIMARY  = "#cdd6f4";
-    private static final String TEXT_MUTED    = "#7f849c";
-    private static final String BORDER        = "#45475a";
+    // ── theme selection ──────────────────────────────────────────────────────
+    private enum ThemeMode {
+        LIGHT, DARK, SYSTEM;
 
-    // JWT segment colours
-    private static final String COLOR_HEADER    = "#61afef";
-    private static final String COLOR_PAYLOAD   = "#e5c07b";
-    private static final String COLOR_SIGNATURE = "#98c379";
+        String displayName() {
+            return switch (this) {
+                case LIGHT  -> "Light";
+                case DARK   -> "Dark";
+                case SYSTEM -> "Auto";
+            };
+        }
+    }
+
+    /**
+     * One full colour palette. Strictly monotone (grayscale): meaning is conveyed through
+     * text, icons and weight rather than hue, and every pairing below is chosen to clear
+     * WCAG AA contrast for its role.
+     */
+    private record Palette(String bgDark, String bgSurface, String bgCard,
+                            String accent, String accentHover, String accentText,
+                            String textPrimary, String textSecondary, String textMuted,
+                            String border) {}
+
+    private static final Palette DARK = new Palette(
+            "#121212", "#171717", "#1e1e1e",
+            "#f5f5f5", "#d6d6d6", "#121212",
+            "#f5f5f5", "#b0b0b0", "#8a8a8a", "#333333");
+
+    private static final Palette LIGHT = new Palette(
+            "#ffffff", "#ffffff", "#f2f2f2",
+            "#111111", "#2e2e2e", "#ffffff",
+            "#111111", "#4d4d4d", "#5c5c5c", "#dcdcdc");
+
+    private static final Preferences PREFS = Preferences.userNodeForPackage(App.class);
+    private static final String PREF_THEME_MODE = "themeMode";
+
+    private ThemeMode themeMode = ThemeMode.SYSTEM;
+
+    // ── colour fields (re-assigned whenever the active theme changes) ─────────
+    private String BG_DARK;
+    private String BG_SURFACE;
+    private String BG_CARD;
+    private String ACCENT;
+    private String ACCENT_HOVER;
+    private String ACCENT_TEXT;
+    private String TEXT_PRIMARY;
+    private String TEXT_SECONDARY;
+    private String TEXT_MUTED;
+    private String BORDER;
 
 // A single Key/Value row rendered in the output tables.
     private record Field(String key, String value) {}
@@ -84,16 +127,35 @@ public class App extends Application {
     private Label     iatLabel;
     private Label     nbfLabel;
     private TextFlow  tokenPreview;
+    private VBox      metaBox;
+    private VBox      analysisBox;
+
+    private Stage      stage;
+    private BorderPane root;
+    private Scene       scene;
 
     @Override
     public void start(Stage stage) {
-        BorderPane root = new BorderPane();
-        root.setStyle("-fx-background-color: " + BG_DARK + ";");
+        this.stage = stage;
 
+        themeMode = parseThemeMode(PREFS.get(PREF_THEME_MODE, ThemeMode.SYSTEM.name()));
+        applyPalette(resolvePalette(themeMode));
+
+        // Follow OS theme changes live while in SYSTEM mode.
+        Platform.getPreferences().colorSchemeProperty().addListener((obs, oldScheme, newScheme) -> {
+            if (themeMode == ThemeMode.SYSTEM) {
+                applyPalette(paletteFor(newScheme));
+                rebuildUi();
+            }
+        });
+
+        root = new BorderPane();
+        root.getStyleClass().add(resolvePalette(themeMode) == LIGHT ? "theme-light" : "theme-dark");
+        root.setStyle("-fx-background-color: " + BG_DARK + ";");
         root.setTop(buildHeader());
         root.setCenter(buildContent());
 
-        Scene scene = new Scene(root, 1000, 760);
+        scene = new Scene(root, 1000, 760);
         scene.getStylesheets().add(
                 getClass().getResource("/jwt-inspector.css").toExternalForm());
         stage.setTitle("JWT Inspector");
@@ -103,32 +165,152 @@ public class App extends Application {
         stage.show();
     }
 
+    // ── theme helpers ─────────────────────────────────────────────────────────
+
+    private ThemeMode parseThemeMode(String raw) {
+        try {
+            return ThemeMode.valueOf(raw);
+        } catch (Exception e) {
+            return ThemeMode.SYSTEM;
+        }
+    }
+
+    private Palette paletteFor(ColorScheme scheme) {
+        return scheme == ColorScheme.DARK ? DARK : LIGHT;
+    }
+
+    private Palette resolvePalette(ThemeMode mode) {
+        return switch (mode) {
+            case DARK   -> DARK;
+            case LIGHT  -> LIGHT;
+            case SYSTEM -> paletteFor(Platform.getPreferences().getColorScheme());
+        };
+    }
+
+    private void applyPalette(Palette p) {
+        BG_DARK        = p.bgDark();
+        BG_SURFACE     = p.bgSurface();
+        BG_CARD        = p.bgCard();
+        ACCENT         = p.accent();
+        ACCENT_HOVER   = p.accentHover();
+        ACCENT_TEXT    = p.accentText();
+        TEXT_PRIMARY   = p.textPrimary();
+        TEXT_SECONDARY = p.textSecondary();
+        TEXT_MUTED     = p.textMuted();
+        BORDER         = p.border();
+
+        if (root != null) {
+            root.getStyleClass().removeAll("theme-dark", "theme-light");
+            root.getStyleClass().add(p == LIGHT ? "theme-light" : "theme-dark");
+        }
+    }
+
+    /** Called when the user picks a theme, or the OS theme changes while following it. */
+    private void switchTheme(ThemeMode mode) {
+        themeMode = mode;
+        PREFS.put(PREF_THEME_MODE, mode.name());
+        applyPalette(resolvePalette(mode));
+        rebuildUi();
+    }
+
+    /** Rebuilds the whole UI against the current palette, preserving the user's input and results. */
+    private void rebuildUi() {
+        String tokenText   = tokenInput != null ? tokenInput.getText() : "";
+        String secretText  = secretField != null ? secretField.getText() : "";
+        boolean verify     = verifyCheck != null && verifyCheck.isSelected();
+        boolean hadResults = analysisBox != null && analysisBox.isVisible();
+
+        root.setStyle("-fx-background-color: " + BG_DARK + ";");
+        root.setTop(buildHeader());
+        root.setCenter(buildContent());
+
+        tokenInput.setText(tokenText);
+        secretField.setText(secretText);
+        verifyCheck.setSelected(verify);
+
+        if (hadResults && !tokenText.isBlank()) {
+            inspect();
+        }
+    }
+
     // ── top header bar ────────────────────────────────────────────────────────
     private HBox buildHeader() {
-        Label logo = new Label("🔍 JWT Inspector");
-        logo.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: " + TEXT_PRIMARY + ";");
+        Label logo = new Label("JWT Inspector");
+        logo.setStyle("-fx-font-size: 18px; -fx-font-weight: bold; -fx-text-fill: " + TEXT_PRIMARY + ";");
 
-        Label sub = new Label("Decode · Inspect · Verify");
-        sub.setStyle("-fx-font-size: 12px; -fx-text-fill: " + TEXT_MUTED + ";");
+        ComboBox<ThemeMode> themeSwitch = buildThemeSwitch();
 
-        VBox titles = new VBox(2, logo, sub);
-        titles.setAlignment(Pos.CENTER_LEFT);
-
-        Button aboutBtn = new Button("About");
-        aboutBtn.setStyle("-fx-background-color: " + BG_CARD + "; "
+        Button infoBtn = new Button("ⓘ"); // circled Latin small letter i
+        infoBtn.setTooltip(new Tooltip("About"));
+        infoBtn.setStyle("-fx-background-color: transparent; "
                  + "-fx-text-fill: " + TEXT_MUTED + "; "
-                 + "-fx-font-size: 12px; -fx-padding: 4 12; -fx-background-radius: 6; -fx-cursor: hand;");
-        aboutBtn.setOnAction(e -> showAboutDialog());
+                 + "-fx-font-size: 18px; -fx-padding: 0 6; -fx-background-radius: 50%; -fx-cursor: hand;");
+        infoBtn.setOnMouseEntered(e -> infoBtn.setStyle("-fx-background-color: transparent; "
+                 + "-fx-text-fill: " + TEXT_PRIMARY + "; "
+                 + "-fx-font-size: 18px; -fx-padding: 0 6; -fx-background-radius: 50%; -fx-cursor: hand;"));
+        infoBtn.setOnMouseExited(e -> infoBtn.setStyle("-fx-background-color: transparent; "
+                 + "-fx-text-fill: " + TEXT_MUTED + "; "
+                 + "-fx-font-size: 18px; -fx-padding: 0 6; -fx-background-radius: 50%; -fx-cursor: hand;"));
+        infoBtn.setOnAction(e -> showAboutDialog());
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox header = new HBox(titles, spacer, aboutBtn);
-        header.setPadding(new Insets(18, 24, 18, 24));
+        HBox header = new HBox(14, logo, spacer, themeSwitch, infoBtn);
+        header.setAlignment(Pos.CENTER_LEFT);
+        header.setPadding(new Insets(16, 24, 16, 24));
         header.setStyle("-fx-background-color: " + BG_SURFACE + "; "
                  + "-fx-border-color: " + BORDER + "; "
                  + "-fx-border-width: 0 0 1 0;");
         return header;
+    }
+
+    /**
+     * Builds a Light / Dark / Auto theme selector as a dropdown. The popup's list cells are
+     * styled explicitly (rather than left to the default list-view skin) so the option text
+     * always keeps strong contrast against its background, in dark mode as well as light.
+     */
+    private ComboBox<ThemeMode> buildThemeSwitch() {
+        ComboBox<ThemeMode> combo = new ComboBox<>();
+        combo.getItems().addAll(ThemeMode.LIGHT, ThemeMode.DARK, ThemeMode.SYSTEM);
+        combo.setValue(themeMode);
+        combo.setConverter(new StringConverter<>() {
+            @Override public String toString(ThemeMode mode) { return mode == null ? "" : mode.displayName(); }
+            @Override public ThemeMode fromString(String s) { return null; }
+        });
+        combo.setButtonCell(themeListCell());
+        combo.setCellFactory(list -> themeListCell());
+        combo.setStyle("-fx-background-color: " + BG_CARD + "; "
+                + "-fx-text-fill: " + TEXT_PRIMARY + "; "
+                + "-fx-border-color: " + BORDER + "; "
+                + "-fx-border-radius: 6; -fx-background-radius: 6; "
+                + "-fx-font-size: 12px; -fx-font-weight: normal; -fx-mark-color: " + TEXT_MUTED + ";");
+        combo.valueProperty().addListener((obs, oldMode, newMode) -> {
+            if (newMode != null && newMode != themeMode) {
+                switchTheme(newMode);
+            }
+        });
+        return combo;
+    }
+
+    /** A dropdown row for the theme selector, colored explicitly for readability against BG_CARD. */
+    private ListCell<ThemeMode> themeListCell() {
+        return new ListCell<>() {
+            @Override
+            protected void updateItem(ThemeMode item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setText(null);
+                    setStyle("");
+                    return;
+                }
+                setText(item.displayName());
+                boolean selected = item == themeMode;
+                setStyle("-fx-background-color: " + (selected ? ACCENT : BG_CARD) + "; "
+                        + "-fx-text-fill: " + (selected ? ACCENT_TEXT : TEXT_PRIMARY) + "; "
+                        + "-fx-font-size: 12px; -fx-font-weight: normal;");
+            }
+        };
     }
 
     /** Shows a modal with the application's identity, version, license, and copyright. */
@@ -142,35 +324,72 @@ public class App extends Application {
                 "https://www.apache.org/licenses/LICENSE-2.0");
         String copyright = manifest("Implementation-Vendor", "Juti Noppornpitak");
 
-        VBox content = new VBox(8,
-                label("Name", title),
-                label("Version", version),
-                label("License", license + "  (" + licenseUrl + ")"),
-                label("Copyright", "© " + copyright)
-        );
-        content.setPadding(new Insets(16, 20, 16, 20));
-        content.setStyle("-fx-font-family: 'Menlo', 'Consolas', monospace;");
+        ImageView icon = new ImageView();
+        var iconUrl = getClass().getResource("/app-icon.png");
+        if (iconUrl != null) {
+            icon.setImage(new Image(iconUrl.toExternalForm()));
+        }
+        icon.setFitWidth(72);
+        icon.setFitHeight(72);
+        icon.setPreserveRatio(true);
+        icon.setStyle("-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.25), 12, 0, 0, 2);");
+
+        Label nameLbl = new Label(title);
+        nameLbl.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: " + TEXT_PRIMARY + ";");
+
+        Label versionBadge = new Label("v" + version);
+        versionBadge.setStyle("-fx-font-size: 11px; -fx-text-fill: " + ACCENT_TEXT + "; "
+                + "-fx-background-color: " + ACCENT + "; "
+                + "-fx-padding: 2 10; -fx-background-radius: 12;");
+
+        VBox heading = new VBox(8, icon, nameLbl, versionBadge);
+        heading.setAlignment(Pos.CENTER);
+
+        Separator sep1 = new Separator();
+
+        Hyperlink licenseLink = new Hyperlink(license);
+        licenseLink.setStyle("-fx-text-fill: " + TEXT_PRIMARY + "; -fx-font-size: 12px; -fx-underline: true;");
+        licenseLink.setOnAction(e -> openUrl(licenseUrl));
+
+        HBox licenseRow = new HBox(6, mutedText("License"), licenseLink);
+        licenseRow.setAlignment(Pos.CENTER);
+
+        Label copyrightLbl = new Label("© " + copyright);
+        copyrightLbl.setStyle("-fx-font-size: 11px; -fx-text-fill: " + TEXT_MUTED + ";");
+
+        VBox details = new VBox(6, licenseRow, copyrightLbl);
+        details.setAlignment(Pos.CENTER);
+
+        VBox content = new VBox(16, heading, sep1, details);
+        content.setAlignment(Pos.CENTER);
+        content.setPadding(new Insets(24, 32, 20, 32));
+        content.setStyle("-fx-background-color: " + BG_SURFACE + ";");
 
         dialog.setTitle("About " + title);
         dialog.initModality(Modality.WINDOW_MODAL);
-        dialog.getDialogPane().setStyle(dialogPaneStyle());
+        dialog.getDialogPane().setStyle("-fx-background-color: " + BG_SURFACE + ";");
         dialog.getDialogPane().setContent(content);
         dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
         dialog.getDialogPane().lookupButton(ButtonType.CLOSE)
-                .setStyle(buttonStyle(ACCENT));
+                .setStyle(buttonStyle(ACCENT, ACCENT_TEXT));
         dialog.showAndWait();
     }
 
-    /** A labelled "key  value" row for the About modal. */
-    private Text label(String key, String value) {
-        Text text = new Text(key + "  :  " + value);
-        text.setStyle("-fx-font-family: 'Menlo', 'Consolas', monospace; "
-                 + "-fx-font-size: 12px; -fx-fill: " + TEXT_PRIMARY + ";");
-        return text;
+    /** A small muted caption label, used inline before a value. */
+    private Label mutedText(String text) {
+        Label lbl = new Label(text);
+        lbl.setStyle("-fx-font-size: 12px; -fx-text-fill: " + TEXT_MUTED + ";");
+        return lbl;
     }
 
-    private String dialogPaneStyle() {
-        return "-fx-background-color: " + BG_SURFACE + ";";
+    /** Opens a URL in the user's default browser, ignoring failures on unsupported platforms. */
+    private void openUrl(String url) {
+        try {
+            if (java.awt.Desktop.isDesktopSupported()) {
+                java.awt.Desktop.getDesktop().browse(new java.net.URI(url));
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     /** Reads a manifest attribute, falling back to a default when absent (e.g. under Gradle run). */
@@ -228,7 +447,7 @@ public class App extends Application {
         tokenPreview.setPrefHeight(36);
 
         // Secret + verify row
-        Label secretLbl = sectionLabel("HMAC Secret (optional)");
+        Label secretLbl = sectionLabel("Secret (HMAC only — RS/ES/PS use the issuer's JWKS)");
 
         secretField = new TextField();
         secretField.setPromptText("your-256-bit-secret");
@@ -242,15 +461,15 @@ public class App extends Application {
 
         // Inspect button
         Button inspectBtn = new Button("Inspect Token");
-        inspectBtn.setStyle(buttonStyle(ACCENT));
+        inspectBtn.setStyle(buttonStyle(ACCENT, ACCENT_TEXT));
         inspectBtn.setMaxWidth(Double.MAX_VALUE);
-        inspectBtn.setOnMouseEntered(e -> inspectBtn.setStyle(buttonStyle(ACCENT_HOVER)));
-        inspectBtn.setOnMouseExited(e  -> inspectBtn.setStyle(buttonStyle(ACCENT)));
+        inspectBtn.setOnMouseEntered(e -> inspectBtn.setStyle(buttonStyle(ACCENT_HOVER, ACCENT_TEXT)));
+        inspectBtn.setOnMouseExited(e  -> inspectBtn.setStyle(buttonStyle(ACCENT, ACCENT_TEXT)));
         inspectBtn.setOnAction(e -> inspect());
 
         // Clear button
         Button clearBtn = new Button("Clear");
-        clearBtn.setStyle(buttonStyle(BG_CARD));
+        clearBtn.setStyle(buttonStyle(BG_CARD, TEXT_PRIMARY));
         clearBtn.setMaxWidth(Double.MAX_VALUE);
         clearBtn.setOnAction(e -> clearAll());
 
@@ -264,7 +483,9 @@ public class App extends Application {
         statusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: " + TEXT_MUTED + ";");
 
         // Claims metadata grid
-        VBox metaBox = buildMetaBox();
+        metaBox = buildMetaBox();
+        metaBox.setVisible(false);
+        metaBox.setManaged(false);
 
         VBox panel = new VBox(12,
                 tokenLbl, tokenInput, tokenPreview,
@@ -302,15 +523,17 @@ public class App extends Application {
 
     // ── right: output ─────────────────────────────────────────────────────────
     private VBox buildOutputPanel() {
-        headerTable    = keyValueTable(COLOR_HEADER);
-        payloadTable   = keyValueTable(COLOR_PAYLOAD);
-        signatureTable = keyValueTable(COLOR_SIGNATURE);
+        headerTable    = keyValueTable(TEXT_PRIMARY);
+        payloadTable   = keyValueTable(TEXT_SECONDARY);
+        signatureTable = keyValueTable(TEXT_MUTED);
         findingTable   = findingTable();
 
-        VBox headerBox    = outputSection("Header",    COLOR_HEADER,    headerTable);
-        VBox payloadBox    = outputSection("Payload",   COLOR_PAYLOAD,   payloadTable);
-        VBox signatureBox = outputSection("Signature", COLOR_SIGNATURE, signatureTable);
-        VBox analysisBox   = buildAnalysisCard();
+        VBox headerBox    = outputSection("Header",    TEXT_PRIMARY,   headerTable);
+        VBox payloadBox    = outputSection("Payload",   TEXT_SECONDARY, payloadTable);
+        VBox signatureBox = outputSection("Signature", TEXT_MUTED,     signatureTable);
+        analysisBox    = buildAnalysisCard();
+        analysisBox.setVisible(false);
+        analysisBox.setManaged(false);
 
           // Let each output card stretch to fill the available vertical space
         VBox.setVgrow(headerBox,    Priority.ALWAYS);
@@ -334,7 +557,7 @@ public class App extends Application {
         qualityLabel = new Label("—");
         impersonationLabel = new Label("—");
         for (var lbl : new Label[]{typeLabel, qualityLabel, impersonationLabel}) {
-            lbl.setStyle("-fx-font-family: monospace; -fx-font-size: 12px; -fx-text-fill: " + TEXT_PRIMARY + ";");
+            lbl.setStyle("-fx-font-size: 12px; -fx-text-fill: " + TEXT_PRIMARY + ";");
          }
 
         GridPane grid = new GridPane();
@@ -364,7 +587,7 @@ public class App extends Application {
         table.setStyle("-fx-accent: " + ACCENT + ";");
 
         TableColumn<Field, String> sevCol = new TableColumn<>("Severity");
-        sevCol.setCellValueFactory(new PropertyValueFactory<>("key"));
+        sevCol.setCellValueFactory(data -> new ReadOnlyObjectWrapper<>(data.getValue().key()));
         sevCol.setPrefWidth(90);
         sevCol.setCellFactory(col -> new TableCell<>() {
                @Override
@@ -381,7 +604,7 @@ public class App extends Application {
            });
 
         TableColumn<Field, String> detailCol = new TableColumn<>("Finding");
-        detailCol.setCellValueFactory(new PropertyValueFactory<>("value"));
+        detailCol.setCellValueFactory(data -> new ReadOnlyObjectWrapper<>(data.getValue().value()));
         detailCol.setCellFactory(col -> new TableCell<>() {
                @Override
              protected void updateItem(String value, boolean empty) {
@@ -398,7 +621,7 @@ public class App extends Application {
         return table;
      }
 
-    /** Builds a Key/Value table with a monospace body and a coloured header. */
+    /** Builds a Key/Value table using the system font, with a muted key column. */
     private TableView<Field> keyValueTable(String accentColor) {
         TableView<Field> table = new TableView<>();
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_ALL_COLUMNS);
@@ -406,7 +629,7 @@ public class App extends Application {
         table.setStyle("-fx-accent: " + accentColor + ";");
 
         TableColumn<Field, String> keyCol = new TableColumn<>("Key");
-        keyCol.setCellValueFactory(new PropertyValueFactory<>("key"));
+        keyCol.setCellValueFactory(data -> new ReadOnlyObjectWrapper<>(data.getValue().key()));
         keyCol.setPrefWidth(150);
         keyCol.setMaxWidth(240);
         keyCol.setCellFactory(col -> new TableCell<>() {
@@ -419,7 +642,7 @@ public class App extends Application {
           });
 
         TableColumn<Field, String> valueCol = new TableColumn<>("Value");
-        valueCol.setCellValueFactory(new PropertyValueFactory<>("value"));
+        valueCol.setCellValueFactory(data -> new ReadOnlyObjectWrapper<>(data.getValue().value()));
 
          // Wrap long values instead of truncating them
         valueCol.setCellFactory(col -> new TableCell<>() {
@@ -577,27 +800,28 @@ public class App extends Application {
 
       private String severityColor(String severity) {
         return switch (severity == null ? "" : severity.toLowerCase()) {
-            case "error"   -> ERROR;
-            case "warning" -> "#e5c07b";
-            case "info", "ok" -> SUCCESS;
+            case "error"   -> TEXT_PRIMARY;
+            case "warning" -> TEXT_SECONDARY;
+            case "info", "ok" -> TEXT_MUTED;
             default        -> TEXT_MUTED;
          };
        }
     private void inspect() {
         String token = tokenInput.getText().trim();
         if (token.isEmpty()) {
-            setStatus("Please paste a JWT token first.", ERROR);
+            setStatus("Please paste a JWT token first.", TEXT_PRIMARY);
             return;
           }
 
         try {
             JwtInspector.InspectionResult result;
 
-            if (verifyCheck.isSelected() && !secretField.getText().isBlank()) {
-                result = JwtInspector.decodeAndVerify(token, secretField.getText());
-            } else {
+            if (verifyCheck.isSelected()) {
+                String secret = secretField.getText();
+                result = JwtInspector.decodeAndVerify(token, secret == null ? "" : secret);
+              } else {
                 result = JwtInspector.decode(token);
-            }
+              }
 
             headerTable.getItems().setAll(toFieldRows(result.headerJson()));
             payloadTable.getItems().setAll(toFieldRows(result.payloadJson()));
@@ -610,19 +834,21 @@ public class App extends Application {
             var analysis = result.analysis();
             updateAnalysis(analysis);
 
+            revealResults();
+
              // Status
             String statusMsg = result.verificationMessage();
             if (result.isExpired()) {
                 statusMsg += "   ⚠ Token is EXPIRED";
-                setStatus(statusMsg, ERROR);
+                setStatus(statusMsg, TEXT_PRIMARY);
             } else if (result.signatureVerified()) {
-                setStatus(statusMsg, SUCCESS);
+                setStatus(statusMsg, TEXT_PRIMARY);
             } else {
                 setStatus(statusMsg, TEXT_MUTED);
             }
 
           } catch (IllegalArgumentException ex) {
-             setStatus("Error: " + ex.getMessage(), ERROR);
+             setStatus("Error: " + ex.getMessage(), TEXT_PRIMARY);
              headerTable.getItems().clear();
              payloadTable.getItems().clear();
              signatureTable.getItems().clear();
@@ -630,10 +856,11 @@ public class App extends Application {
              iatLabel.setText("—");
              nbfLabel.setText("—");
              resetAnalysis();
-           }
-       }
+             hideResults();
+             }
+        }
 
-      private void clearAll() {
+    private void clearAll() {
         tokenInput.clear();
         secretField.clear();
         headerTable.getItems().clear();
@@ -644,14 +871,31 @@ public class App extends Application {
         statusLabel.setText("");
         tokenPreview.getChildren().clear();
         resetAnalysis();
-       }
+        hideResults();
+        }
+
+      /** Reveals the claims and analysis cards after a successful inspection. */
+     private void revealResults() {
+         metaBox.setVisible(true);
+         metaBox.setManaged(true);
+         analysisBox.setVisible(true);
+         analysisBox.setManaged(true);
+        }
+
+      /** Hides the claims and analysis cards so results stay out of view until inspected. */
+     private void hideResults() {
+         metaBox.setVisible(false);
+         metaBox.setManaged(false);
+         analysisBox.setVisible(false);
+         analysisBox.setManaged(false);
+        }
 
     /** Colour-codes the token in three segments separated by dots. */
     private void updatePreview(String token) {
         tokenPreview.getChildren().clear();
         if (token == null || token.isBlank()) return;
 
-        String[] colors = { COLOR_HEADER, COLOR_PAYLOAD, COLOR_SIGNATURE };
+        String[] colors = { TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED };
         String[] parts  = token.trim().split("\\.", -1);
 
         for (int i = 0; i < parts.length && i < 3; i++) {
@@ -669,7 +913,9 @@ public class App extends Application {
 
      private void setStatus(String message, String color) {
         statusLabel.setText(message);
-        statusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: " + color + ";");
+        boolean emphasize = !color.equals(TEXT_MUTED);
+        statusLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: " + color + ";"
+                + (emphasize ? " -fx-font-weight: bold;" : ""));
       }
 
       /** Populates the Analysis card (type / quality / impersonation + findings) from an Analysis. */
@@ -681,8 +927,9 @@ public class App extends Application {
         typeLabel.setText(analysis.tokenType());
         qualityLabel.setText(analysis.quality());
         impersonationLabel.setText(analysis.hasImpersonation() ? "yes" : "no");
-        impersonationLabel.setStyle("-fx-font-family: monospace; -fx-font-size: 12px; "
-                 + "-fx-text-fill: " + (analysis.hasImpersonation() ? "#e5c07b" : SUCCESS) + ";");
+        impersonationLabel.setStyle("-fx-font-size: 12px; -fx-font-weight: "
+                 + (analysis.hasImpersonation() ? "bold" : "normal") + "; "
+                 + "-fx-text-fill: " + (analysis.hasImpersonation() ? TEXT_PRIMARY : TEXT_MUTED) + ";");
         findingTable.getItems().setAll(toFindingRows(analysis));
       }
 
@@ -709,7 +956,7 @@ public class App extends Application {
 
     private Label metaValueLabel(String text) {
         Label lbl = new Label(text);
-        lbl.setStyle("-fx-font-size: 12px; -fx-text-fill: " + TEXT_PRIMARY + "; -fx-font-family: monospace;");
+        lbl.setStyle("-fx-font-size: 12px; -fx-text-fill: " + TEXT_PRIMARY + ";");
         return lbl;
     }
 
@@ -733,7 +980,6 @@ public class App extends Application {
                 + "-fx-background-color: transparent; "
                 + "-fx-text-fill: " + TEXT_PRIMARY + "; "
                 + "-fx-prompt-text-fill: " + TEXT_MUTED + "; "
-                + "-fx-font-family: 'Menlo', 'Consolas', monospace; "
                 + "-fx-font-size: 12px; "
                 + "-fx-border-color: " + BORDER + "; "
                 + "-fx-border-radius: 6; "
@@ -743,9 +989,9 @@ public class App extends Application {
                 + "-fx-padding: 6 10;";
     }
 
-    private String buttonStyle(String bg) {
+    private String buttonStyle(String bg, String textFill) {
         return "-fx-background-color: " + bg + "; "
-                + "-fx-text-fill: " + TEXT_PRIMARY + "; "
+                + "-fx-text-fill: " + textFill + "; "
                 + "-fx-font-size: 13px; -fx-font-weight: bold; "
                 + "-fx-padding: 8 16; -fx-background-radius: 8; -fx-cursor: hand;";
     }
